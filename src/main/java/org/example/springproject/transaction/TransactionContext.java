@@ -13,31 +13,38 @@ public class TransactionContext {
     private final Map<String, Lock> readLocks = new HashMap<>();
     private final Map<String, Lock> writeLocks = new HashMap<>();
 
-    public TransactionContext(String transactionId){
-        this.transactionId=transactionId;
+    public TransactionContext(String transactionId) {
+        this.transactionId = transactionId;
     }
 
-    public String getTransactionId(){
+    public String getTransactionId() {
         return transactionId;
     }
-    public Connection getInventoryConnection(){
+
+    public Connection getInventoryConnection() {
         return inventoryConnection;
     }
-    public Connection getOrderConnection(){
+
+    public Connection getOrderConnection() {
         return orderConnection;
     }
-    public void setInventoryConnection(Connection inventoryConnection){
+
+    public void setInventoryConnection(Connection inventoryConnection) {
         this.inventoryConnection = inventoryConnection;
     }
-    public void setOrderConnection(Connection orderConnection){
+
+    public void setOrderConnection(Connection orderConnection) {
         this.orderConnection = orderConnection;
     }
-    public void addReadLock(String tableName, Lock lock){
+
+    public void addReadLock(String tableName, Lock lock) {
         readLocks.put(tableName, lock);
     }
-    public void addWriteLock(String tableName, Lock lock){
+
+    public void addWriteLock(String tableName, Lock lock) {
         writeLocks.put(tableName, lock);
     }
+
     public void releaseAllLocks() {
         readLocks.values().forEach(lock -> {
             try {
@@ -46,10 +53,11 @@ public class TransactionContext {
             }
         });
 
-        writeLocks.values().forEach(lock->{
+        writeLocks.values().forEach(lock -> {
             try {
                 lock.unlock();
-            } catch (IllegalMonitorStateException ignored) {}
+            } catch (IllegalMonitorStateException ignored) {
+            }
         });
 
         readLocks.clear();

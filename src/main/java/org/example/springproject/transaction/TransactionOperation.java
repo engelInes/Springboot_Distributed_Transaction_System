@@ -20,15 +20,19 @@ public class TransactionOperation {
     public String getTransactionId() {
         return transactionId;
     }
+
     public String getOperationType() {
         return operationType;
     }
+
     public String getTableName() {
         return tableName;
     }
+
     public Map<String, Object> getBeforeSnapshot() {
         return beforeSnapshot;
     }
+
     public Map<String, Object> getAfterSnapshot() {
         return afterSnapshot;
     }

@@ -1,7 +1,7 @@
 package org.example.springproject.transaction;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.awaitility.core.DeadlockException;
+import org.example.springproject.exceptions.DeadlockException;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.batch.BatchProperties;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -11,16 +11,20 @@ import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+
 import org.example.springproject.transaction.TransactionContext;
+import org.springframework.stereotype.Component;
+
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
+@Component
 public class DistributedTransaction {
     /**
-     *instance connected to inventory database in order to manually run SQL statements
+     * instance connected to inventory database in order to manually run SQL statements
      */
     private final JdbcTemplate inventoryJdbcTemplate;
     /**
-     *instance connected to order database
+     * instance connected to order database
      */
     private final JdbcTemplate orderJdbcTemplate;
 
@@ -52,16 +56,16 @@ public class DistributedTransaction {
 
     public DistributedTransaction(
             @Qualifier("inventoryJdbcTemplate") JdbcTemplate inventoryJdbcTemplate,
-            @Qualifier("orderJdbcTemplate") JdbcTemplate orderJdbcTemplate){
-        this.inventoryJdbcTemplate=inventoryJdbcTemplate;
-        this.orderJdbcTemplate=orderJdbcTemplate;
+            @Qualifier("orderJdbcTemplate") JdbcTemplate orderJdbcTemplate) {
+        this.inventoryJdbcTemplate = inventoryJdbcTemplate;
+        this.orderJdbcTemplate = orderJdbcTemplate;
 
         initializeTableLocks();
     }
 
-    private void initializeTableLocks(){
+    private void initializeTableLocks() {
         String[] tables = {"products", "suppliers", "orders", "inventory_transactions", "customers", "payments"};
-        for(String table:tables){
+        for (String table : tables) {
             tableLocks.put(table, new ReentrantReadWriteLock(true));
         }
     }
@@ -72,11 +76,11 @@ public class DistributedTransaction {
      *
      * @return transaction ID
      */
-    public String beginTransaction(){
+    public String beginTransaction() {
         String transactionId = UUID.randomUUID().toString();
         TransactionContext context = new TransactionContext(transactionId);
 
-        try{
+        try {
             Connection inventoryConnection = inventoryJdbcTemplate.getDataSource().getConnection();
             Connection orderConnection = orderJdbcTemplate.getDataSource().getConnection();
             inventoryConnection.setAutoCommit(false);
@@ -85,24 +89,25 @@ public class DistributedTransaction {
             context.setInventoryConnection(inventoryConnection);
             context.setOrderConnection(orderConnection);
 
-            activeTransactions.put(transactionId,context);
+            activeTransactions.put(transactionId, context);
             transactionLog.put(transactionId, new ArrayList<>());
             transactionLocks.put(transactionId, new HashSet<>());
 
-            System.out.println(transactionId.substring(0,8) + "transaction started");
+            System.out.println(transactionId.substring(0, 8) + "transaction started");
             return transactionId;
-        }catch (SQLException e){
+        } catch (SQLException e) {
             throw new RuntimeException("failed to start");
         }
     }
 
     /**
      * checks whether a deadlock exists in the graph
-     * @param node     the starting transaction ID
-     * @param visited  set of transactions already visited
+     *
+     * @param node    the starting transaction ID
+     * @param visited set of transactions already visited
      * @return true if a deadlock is found, false otherwise
      */
-    private boolean hasCycle(String node, Set<String> visited){
+    private boolean hasCycle(String node, Set<String> visited) {
         if (visited.contains(node)) {
             return true;
         }
@@ -121,17 +126,22 @@ public class DistributedTransaction {
 
     /**
      * checks for deadlocks before acquiring a table lock
-     * @param transactionId ID of the current transaction
+     *
+     * @param transactionId  ID of the current transaction
      * @param requestedTable name of the table the transaction is trying to lock
      */
-    private void checkForDeadlock(String transactionId, String requestedTable){
-        for(Map.Entry<String, Set<String>> entry: transactionLocks.entrySet()){
+    private void checkForDeadlock(String transactionId, String requestedTable) {
+        for (Map.Entry<String, Set<String>> entry : transactionLocks.entrySet()) {
             String tableId = entry.getKey();
-            if(!tableId.equals(transactionId) && entry.getValue().contains(requestedTable)){
-                waitForGraph.computeIfAbsent(transactionId, k-> new HashSet<>()).add(tableId);
-                if(hasCycle(transactionId, new HashSet<>())){
+            if (!tableId.equals(transactionId) && entry.getValue().contains(requestedTable)) {
+                waitForGraph.computeIfAbsent(transactionId, k -> new HashSet<>()).add(tableId);
+                if (hasCycle(transactionId, new HashSet<>())) {
                     waitForGraph.remove(transactionId);
-                    throw new IllegalStateException();
+                    throw new DeadlockException(
+                            "Deadlock detected: Transaction " + transactionId.substring(0, 8)
+                                    + " waiting for table '" + requestedTable
+                                    + "' held by transaction " + tableId.substring(0, 8)
+                    );
                 }
 
             }
@@ -140,38 +150,38 @@ public class DistributedTransaction {
 
     /**
      * acquires read/write lock on a table for a transaction
+     *
      * @param transactionId ID of the active transaction
      * @param tableName     name of the table to lock
      * @param isWrite       true for write lock, false for read lock
      */
-    public void acquireLock(String transactionId, String tableName, boolean isWrite){
-        TransactionContext transactionContext=activeTransactions.get(transactionId);
-        if(transactionContext == null){
+    public void acquireLock(String transactionId, String tableName, boolean isWrite) {
+        TransactionContext transactionContext = activeTransactions.get(transactionId);
+        if (transactionContext == null) {
             throw new IllegalStateException("transaction id not found");
         }
 
         checkForDeadlock(transactionId, tableName);
 
-        ReentrantReadWriteLock lock=tableLocks.get(tableName);
-        if(lock == null){
+        ReentrantReadWriteLock lock = tableLocks.get(tableName);
+        if (lock == null) {
             throw new IllegalStateException("table lock not found");
         }
 
-        try{
-            System.out.println(transactionId.substring(0,8) + "acquire lock" + (isWrite?"write": "read") + tableName);
+        try {
+            System.out.println(transactionId.substring(0, 8) + "acquire lock" + (isWrite ? "write" : "read") + tableName);
 
-            if(isWrite){
+            if (isWrite) {
                 lock.writeLock().lock();
                 transactionContext.addWriteLock(tableName, lock.writeLock());
-            }
-            else{
+            } else {
                 lock.readLock().lock();
                 transactionContext.addReadLock(tableName, lock.readLock());
             }
 
             transactionLocks.get(transactionId).add(tableName);
-            System.out.println(transactionId.substring(0,8) +"lock acquired" + tableName);
-        }catch (Exception e){
+            System.out.println(transactionId.substring(0, 8) + "lock acquired" + tableName);
+        } catch (Exception e) {
             throw new RuntimeException("failed to acquire lock");
         }
     }
@@ -180,22 +190,21 @@ public class DistributedTransaction {
      * logs a database operation
      * used during rollback
      *
-     * @param transactionId transaction ID
-     * @param operationType type of operation
-     * @param tableName     name of the table
+     * @param transactionId  transaction ID
+     * @param operationType  type of operation
+     * @param tableName      name of the table
      * @param beforeSnapshot state before operation (for rollback)
      * @param afterSnapshot  state after operation (for rollback)
      */
-    private void logOperation(String transactionId, String operationType, String tableName, Map<String, Object> beforeSnapshot, Map<String, Object> afterSnapshot){
+    private void logOperation(String transactionId, String operationType, String tableName, Map<String, Object> beforeSnapshot, Map<String, Object> afterSnapshot) {
         TransactionOperation op = new TransactionOperation(transactionId, operationType, tableName, beforeSnapshot, afterSnapshot);
         transactionLog.get(transactionId).add(op);
     }
 
-    private JdbcTemplate getJdbcTemplateForTable(String tableName){
-        if(tableName.equals("products") || tableName.equals("suppliers") || tableName.equals("inventory_transactions") || tableName.equals("customers")){
+    private JdbcTemplate getJdbcTemplateForTable(String tableName) {
+        if (tableName.equals("products") || tableName.equals("suppliers") || tableName.equals("inventory_transactions") || tableName.equals("customers")) {
             return inventoryJdbcTemplate;
-        }
-        else {
+        } else {
             return orderJdbcTemplate;
         }
     }
@@ -211,12 +220,12 @@ public class DistributedTransaction {
      * @param <T>           result type
      * @return list of result objects
      */
-    public<T> List<T> executeSelect(String transactionId, String sql, RowMapper<T> rowMapper, String tableName, Object ... parameters){
+    public <T> List<T> executeSelect(String transactionId, String sql, RowMapper<T> rowMapper, String tableName, Object... parameters) {
         acquireLock(transactionId, tableName, false);
         TransactionContext context = activeTransactions.get(transactionId);
         JdbcTemplate template = getJdbcTemplateForTable(tableName);
 
-        try{
+        try {
             List<T> results = template.query(sql, rowMapper, parameters);
 
             Map<String, Object> afterSnapshot = new HashMap<>();
@@ -224,15 +233,15 @@ public class DistributedTransaction {
 
             logOperation(transactionId, "SELECT", tableName, null, afterSnapshot);
 
-            System.out.println(transactionId.substring(0, 8) +  "SELECT on " +
+            System.out.println(transactionId.substring(0, 8) + "SELECT on " +
                     tableName + " returned " + results.size() + " rows");
             return results;
-        }catch(Exception e){
+        } catch (Exception e) {
             throw new RuntimeException("failed to execute select" + tableName);
         }
     }
 
-    public Set<String> getActiveTransactions(){
+    public Set<String> getActiveTransactions() {
         return new HashSet<>(activeTransactions.keySet());
     }
 
@@ -246,10 +255,10 @@ public class DistributedTransaction {
      * @param parameters    query parameters
      * @return number of affected rows
      */
-    public int executeInsert(String transactionId, String sql, String tableName, Map<String, Object> data, Object ... parameters){
+    public int executeInsert(String transactionId, String sql, String tableName, Map<String, Object> data, Object... parameters) {
         acquireLock(transactionId, tableName, true);
         JdbcTemplate template = getJdbcTemplateForTable(tableName);
-        try{
+        try {
             int affectedRows = template.update(sql, parameters);
             logOperation(transactionId, "INSERT", tableName, null, data);
             System.out.println(transactionId.substring(0, 8) + "INSERT on " +
@@ -265,11 +274,11 @@ public class DistributedTransaction {
     /**
      * persists transaction logs as JSON strings for potential recovery or debugging.
      */
-    private void persistTransactionLog(String transactionId, String operationType, String tableName, Map<String, Object> beforeSnapshot, Map<String, Object> afterSnapshot){
-        try{
-            String beforeJson = beforeSnapshot!= null ? objectMapper.writeValueAsString(beforeSnapshot) : null;
-            String afterJson = afterSnapshot!= null ? objectMapper.writeValueAsString(afterSnapshot) : null;
-        }catch(Exception e){
+    private void persistTransactionLog(String transactionId, String operationType, String tableName, Map<String, Object> beforeSnapshot, Map<String, Object> afterSnapshot) {
+        try {
+            String beforeJson = beforeSnapshot != null ? objectMapper.writeValueAsString(beforeSnapshot) : null;
+            String afterJson = afterSnapshot != null ? objectMapper.writeValueAsString(afterSnapshot) : null;
+        } catch (Exception e) {
 
         }
     }
@@ -286,7 +295,7 @@ public class DistributedTransaction {
      * @param parameters       SQL parameters
      * @return number of affected rows
      */
-    public int executeUpdate(String transactionId, String sql, String tableName, String primaryKeyColumn, Object primaryKeyValue, Map<String, Object> oldData, Object ... parameters){
+    public int executeUpdate(String transactionId, String sql, String tableName, String primaryKeyColumn, Object primaryKeyValue, Map<String, Object> oldData, Object... parameters) {
         acquireLock(transactionId, tableName, true);
         JdbcTemplate template = getJdbcTemplateForTable(tableName);
 
@@ -298,7 +307,7 @@ public class DistributedTransaction {
             System.out.println(transactionId.substring(0, 8) + "UPDATE on " +
                     tableName + " affected " + affectedRows + " rows");
             return affectedRows;
-        }catch (Exception e){
+        } catch (Exception e) {
             throw new RuntimeException("update failed");
         }
     }
@@ -338,6 +347,7 @@ public class DistributedTransaction {
 
     /**
      * performs rollback of a single logged operation.
+     *
      * @param op the transaction operation to rollback
      */
     private void rollbackOperation(TransactionOperation op) {
@@ -398,26 +408,26 @@ public class DistributedTransaction {
      *
      * @param transactionId ID of the transaction to rollback
      */
-    public void rollback(String transactionId){
+    public void rollback(String transactionId) {
         TransactionContext transactionContext = activeTransactions.get(transactionId);
-        if(transactionContext == null){
+        if (transactionContext == null) {
             throw new IllegalStateException("transaction not found");
         }
 
-        try{
+        try {
             System.out.println(transactionId.substring(0, 8) + " rolling back");
             List<TransactionOperation> operations = transactionLog.get(transactionId);
-            if(operations!=null){
-                for(int i=operations.size()-1;i>=0;i--){
+            if (operations != null) {
+                for (int i = operations.size() - 1; i >= 0; i--) {
                     TransactionOperation operation = operations.get(i);
                     rollbackOperation(operation);
                 }
             }
 
-            if(transactionContext.getInventoryConnection() != null){
+            if (transactionContext.getInventoryConnection() != null) {
                 transactionContext.getInventoryConnection().rollback();
             }
-            if(transactionContext.getOrderConnection() != null){
+            if (transactionContext.getOrderConnection() != null) {
                 transactionContext.getOrderConnection().rollback();
             }
 
@@ -432,23 +442,24 @@ public class DistributedTransaction {
 
     /**
      * commits all operations of the specified transaction across both databases.
+     *
      * @param transactionId ID of the transaction to commit
      */
-    public void commit(String transactionId){
+    public void commit(String transactionId) {
         TransactionContext transactionContext = activeTransactions.get(transactionId);
-        if(transactionContext == null){
+        if (transactionContext == null) {
             throw new IllegalStateException("transaction id not found");
         }
-        try{
+        try {
             System.out.println(transactionId.substring(0, 8) + "commit");
-            if(transactionContext.getInventoryConnection()!=null){
+            if (transactionContext.getInventoryConnection() != null) {
                 transactionContext.getInventoryConnection().commit();
             }
-            if(transactionContext.getOrderConnection()!=null){
+            if (transactionContext.getOrderConnection() != null) {
                 transactionContext.getOrderConnection().commit();
             }
             System.out.println("transaction committed");
-        }catch (SQLException e){
+        } catch (SQLException e) {
             System.err.println(transactionId.substring(0, 8) + "commit failed, rolling back");
             rollback(transactionId);
             throw new RuntimeException("commit failed, rolled back transaction", e);
