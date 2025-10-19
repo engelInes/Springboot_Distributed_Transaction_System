@@ -219,7 +219,11 @@ public class DistributedTransaction {
         try{
             List<T> results = template.query(sql, rowMapper, parameters);
 
-            logOperation(transactionId, "SELECT", tableName, null, "retrieved " + results.size());
+            Map<String, Object> afterSnapshot = new HashMap<>();
+            afterSnapshot.put("message", "retrieved " + results.size() + " rows");
+
+            logOperation(transactionId, "SELECT", tableName, null, afterSnapshot);
+
             System.out.println(transactionId.substring(0, 8) +  "SELECT on " +
                     tableName + " returned " + results.size() + " rows");
             return results;
@@ -258,6 +262,9 @@ public class DistributedTransaction {
         }
     }
 
+    /**
+     * persists transaction logs as JSON strings for potential recovery or debugging.
+     */
     private void persistTransactionLog(String transactionId, String operationType, String tableName, Map<String, Object> beforeSnapshot, Map<String, Object> afterSnapshot){
         try{
             String beforeJson = beforeSnapshot!= null ? objectMapper.writeValueAsString(beforeSnapshot) : null;
@@ -266,6 +273,19 @@ public class DistributedTransaction {
 
         }
     }
+
+    /**
+     * executes an UPDATE operation under a write lock.
+     *
+     * @param transactionId    ID of the transaction
+     * @param sql              UPDATE statement
+     * @param tableName        target table
+     * @param primaryKeyColumn column name of the primary key
+     * @param primaryKeyValue  value of the primary key
+     * @param oldData          data before the update (for rollback)
+     * @param parameters       SQL parameters
+     * @return number of affected rows
+     */
     public int executeUpdate(String transactionId, String sql, String tableName, String primaryKeyColumn, Object primaryKeyValue, Map<String, Object> oldData, Object ... parameters){
         acquireLock(transactionId, tableName, true);
         JdbcTemplate template = getJdbcTemplateForTable(tableName);
@@ -283,6 +303,16 @@ public class DistributedTransaction {
         }
     }
 
+    /**
+     * executes a DELETE operation under a write lock.
+     *
+     * @param transactionId ID of the transaction
+     * @param sql           DELETE statement
+     * @param tableName     target table
+     * @param deletedData   data being deleted (for rollback)
+     * @param params        SQL parameters
+     * @return number of affected rows
+     */
     public int executeDelete(String transactionId, String sql, String tableName,
                              Map<String, Object> deletedData, Object... params) {
         acquireLock(transactionId, tableName, true); // Write lock for DELETE
@@ -306,6 +336,10 @@ public class DistributedTransaction {
         }
     }
 
+    /**
+     * performs rollback of a single logged operation.
+     * @param op the transaction operation to rollback
+     */
     private void rollbackOperation(TransactionOperation op) {
         try {
             JdbcTemplate template = getJdbcTemplateForTable(op.getTableName());
@@ -329,6 +363,13 @@ public class DistributedTransaction {
         }
     }
 
+    /**
+     * cleans up transaction state after commit or rollback,
+     * including releasing locks, closing connections and removing logs.
+     *
+     * @param transactionId ID of the transaction being cleaned
+     * @param context       transaction context containing connections and locks
+     */
     private void cleanup(String transactionId, TransactionContext context) {
         try {
             context.releaseAllLocks();
@@ -351,6 +392,12 @@ public class DistributedTransaction {
             System.err.println("Error during cleanup: " + e.getMessage());
         }
     }
+
+    /**
+     * rolls back a transaction and all its logged operations in reverse order.
+     *
+     * @param transactionId ID of the transaction to rollback
+     */
     public void rollback(String transactionId){
         TransactionContext transactionContext = activeTransactions.get(transactionId);
         if(transactionContext == null){
@@ -382,6 +429,11 @@ public class DistributedTransaction {
         }
 
     }
+
+    /**
+     * commits all operations of the specified transaction across both databases.
+     * @param transactionId ID of the transaction to commit
+     */
     public void commit(String transactionId){
         TransactionContext transactionContext = activeTransactions.get(transactionId);
         if(transactionContext == null){
