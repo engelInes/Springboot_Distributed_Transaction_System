@@ -34,7 +34,7 @@ public class StoreController {
                     "status", "success",
                     "message", "Order placed successfully"
             ));
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(Map.of(
                     "status", "error",
                     "message", e.getMessage()
@@ -45,22 +45,21 @@ public class StoreController {
     /**
      * Restock inventory from supplier
      * POST /api/store/restock
-     * Body: { "productId": 1, "quantity": 100, "supplierAddress": "123 Supplier St" }
+     * Body: { "productId": 1, "quantity": 100 }
      */
     @PostMapping("/restock")
     public ResponseEntity<Map<String, String>> restock(@RequestBody Map<String, Object> request) {
         try {
             Integer productId = (Integer) request.get("productId");
             Integer quantity = (Integer) request.get("quantity");
-            String supplierAddress = (String) request.get("supplierAddress");
 
-            storeService.restockFromSupplier(productId, quantity, supplierAddress);
+            storeService.restockFromSupplier(productId, quantity);
 
             return ResponseEntity.ok(Map.of(
                     "status", "success",
                     "message", "Inventory restocked successfully"
             ));
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(Map.of(
                     "status", "error",
                     "message", e.getMessage()
@@ -81,7 +80,7 @@ public class StoreController {
                     "status", "success",
                     "message", "Order cancelled successfully"
             ));
-        } catch (Exception e) {
+        } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(Map.of(
                     "status", "error",
                     "message", e.getMessage()

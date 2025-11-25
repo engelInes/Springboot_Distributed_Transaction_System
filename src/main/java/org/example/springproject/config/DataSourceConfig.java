@@ -9,6 +9,8 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import javax.sql.DataSource;
+import java.util.HashMap;
+import java.util.Map;
 
 @Configuration
 public class DataSourceConfig {
@@ -37,5 +39,18 @@ public class DataSourceConfig {
     public JdbcTemplate orderJdbcTemplate(
             @Qualifier("orderDataSource") DataSource dataSource) {
         return new JdbcTemplate(dataSource);
+    }
+
+    /**
+     * Provides a map of all JdbcTemplates to the RollbackManager and DatabaseWrapper.
+     */
+    @Bean
+    public Map<String, JdbcTemplate> jdbcTemplates(
+            @Qualifier("inventoryJdbcTemplate") JdbcTemplate inventoryJdbcTemplate,
+            @Qualifier("orderJdbcTemplate") JdbcTemplate orderJdbcTemplate) {
+        Map<String, JdbcTemplate> map = new HashMap<>();
+        map.put("inventory", inventoryJdbcTemplate);
+        map.put("order", orderJdbcTemplate);
+        return map;
     }
 }

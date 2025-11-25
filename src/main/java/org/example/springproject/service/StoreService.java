@@ -1,394 +1,270 @@
 package org.example.springproject.service;
 
+import org.example.springproject.repository.OrderRepository;
+import org.example.springproject.repository.ProductRepository;
 import org.example.springproject.transaction.DistributedTransaction;
+import org.example.springproject.util.TransactionRetryTemplate;
 import org.springframework.stereotype.Service;
-import org.example.springproject.exceptions.DeadlockException;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.time.LocalDateTime;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
-import org.springframework.jdbc.core.RowMapper;
+import static org.example.springproject.util.AppConstants.*;
 
 @Service
 public class StoreService {
-    private final DistributedTransaction transactionManager;
-    private static final int MAX_RETRIES = 3;
 
-    public StoreService(DistributedTransaction transactionManager) {
-        this.transactionManager = transactionManager;
+    private final DistributedTransaction tm;
+    private final ProductRepository productRepo;
+    private final OrderRepository orderRepo;
+    private final TransactionRetryTemplate retryTemplate;
+
+    public StoreService(DistributedTransaction tm,
+                        TransactionRetryTemplate retryTemplate,
+                        ProductRepository productRepo,
+                        OrderRepository orderRepo) {
+        this.tm = tm;
+        this.retryTemplate = retryTemplate;
+        this.productRepo = productRepo;
+        this.orderRepo = orderRepo;
     }
 
-    /**
-     * place an order (distributed transaction across both databases)
-     * - Check product availability (SELECT from inventory DB)
-     * - Update product stock (UPDATE in inventory DB)
-     * - Create order (INSERT in order DB)
-     * - Create payment (INSERT in order DB)
-     */
     public void placeOrder(Integer customerId, Integer productId, Integer quantity) {
-        int retries = 0;
-
-        while (retries < MAX_RETRIES) {
-            String transactionId = transactionManager.beginTransaction();
+        retryTemplate.execute(() -> {
+            String tx = tm.beginTransaction();
             try {
-                List<Map<String, Object>> products = transactionManager.executeSelect(
-                        transactionId,
-                        "SELECT product_id, name, price, stock, version FROM products WHERE product_id = ?",
-                        new ProductRowMapper(),
-                        "products",
-                        productId
-                );
+                Map<String, Object> product = productRepo.findByIdForUpdate(tx, productId);
+                validateProductAvailability(product, quantity);
 
-                if (products.isEmpty()) {
-                    throw new RuntimeException("Product not found");
-                }
+                productRepo.decreaseStock(tx, product, quantity);
 
-                Map<String, Object> product = products.get(0);
-                Integer currentStock = (Integer) product.get("stock");
-                Double currentPrice = (Double) product.get("price");
-                Integer currentVersion = (Integer) product.get("version");
+                double price = getDouble(product.get("price"));
+                int total = (int) (price * quantity);
 
-                if (currentStock < quantity) {
-                    throw new RuntimeException("Product not found");
-                }
+                Integer orderId = orderRepo.createOrder(tx, customerId, productId, quantity, total);
+                orderRepo.createPayment(tx, orderId, total);
 
-                Map<String, Object> oldProductData = new HashMap<>(product);
-
-                int updated = transactionManager.executeUpdate(
-                        transactionId,
-                        "UPDATE products SET stock=stock-?, version=version+1 WHERE product_id=? AND version=?",
-                        "products",
-                        "product_id",
-                        productId,
-                        oldProductData,
-                        quantity, productId, currentVersion
-                );
-
-                if (updated == 0) {
-                    throw new RuntimeException("Product modified");
-                }
-
-                Integer totalAmount = (int) (currentPrice * quantity);
-
-                Map<String, Object> orderData = new HashMap<>();
-                orderData.put("customer_id", customerId);
-                orderData.put("product_id", productId);
-                orderData.put("quantity", quantity);
-                orderData.put("total_amount", totalAmount);
-                orderData.put("status", "PENDING");
-                orderData.put("created_at", LocalDateTime.now());
-                orderData.put("version", 0);
-
-                transactionManager.executeInsert(
-                        transactionId,
-                        "INSERT INTO orders (customer_id, product_id, quantity, total_amount, status, created_at, version) " +
-                                "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        "orders",
-                        orderData,
-                        customerId, productId, quantity, totalAmount, "PENDING", LocalDateTime.now(), 0
-                );
-
-                Map<String, Object> paymentData = new HashMap<>();
-                paymentData.put("order_id", 1);
-                paymentData.put("amount", totalAmount);
-                paymentData.put("payment_method", "CREDIT_CARD");
-                paymentData.put("status", "PENDING");
-                paymentData.put("processed_at", LocalDateTime.now());
-
-                transactionManager.executeInsert(
-                        transactionId,
-                        "INSERT INTO payments (order_id, amount, payment_method, status, processed_at) " +
-                                "VALUES (?, ?, ?, ?, ?)",
-                        "payments",
-                        paymentData,
-                        1, totalAmount, "CREDIT_CARD", "PENDING", LocalDateTime.now()
-                );
-
-                transactionManager.commit(transactionId);
-                System.out.println("Order placed successfully!");
-                return;
-            } catch (DeadlockException e) {
-                System.err.println("Deadlock detected, rolling back... (Retry " + (retries + 1) + "/" + MAX_RETRIES + ")");
-                try {
-                    transactionManager.rollback(transactionId);
-                } catch (Exception rollbackEx) {
-                    System.err.println("Rollback failed: " + rollbackEx.getMessage());
-                }
-                retries++;
-
-                try {
-                    Thread.sleep((long) Math.pow(2, retries) * 100);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Transaction interrupted", ie);
-                }
-
+                tm.commit(tx);
             } catch (Exception e) {
-                System.err.println("Transaction failed: " + e.getMessage());
-                try {
-                    transactionManager.rollback(transactionId);
-                } catch (Exception rollbackEx) {
-                    System.err.println("Rollback failed: " + rollbackEx.getMessage());
-                }
-                throw new RuntimeException("Failed to place order", e);
+                tm.rollback(tx);
+                throw e;
             }
-        }
-        throw new RuntimeException("Failed to place order");
+        }, "Failed to place order");
     }
 
-    /**
-     * restock inventory from supplier
-     * - Insert inventory transaction (INSERT in inventory DB)
-     * - Update product stock (UPDATE in inventory DB)
-     */
-    public void restockFromSupplier(Integer productId, Integer quantity, String supplierAddress) {
-        int retries = 0;
-
-        while (retries < MAX_RETRIES) {
-            String transactionId = transactionManager.beginTransaction();
-
+    public void restockFromSupplier(Integer productId, Integer quantity) {
+        retryTemplate.execute(() -> {
+            String tx = tm.beginTransaction();
             try {
-                Map<String, Object> inventoryTxData = new HashMap<>();
-                inventoryTxData.put("product_id", productId);
-                inventoryTxData.put("quantity_change", quantity);
-                inventoryTxData.put("supplier_address", supplierAddress);
-                inventoryTxData.put("timestamp", LocalDateTime.now());
+                productRepo.logInventoryTransaction(tx, productId, quantity);
 
-                transactionManager.executeInsert(
-                        transactionId,
-                        "INSERT INTO inventory_transactions (product_id, quantity_change, supplier_address, timestamp) " +
-                                "VALUES (?, ?, ?, ?)",
-                        "inventory_transactions",
-                        inventoryTxData,
-                        productId, quantity, supplierAddress, LocalDateTime.now()
-                );
+                Map<String, Object> product = productRepo.findByIdForUpdate(tx, productId);
+                if (product == null) throw new RuntimeException("Product not found");
 
-                List<Map<String, Object>> products = transactionManager.executeSelect(
-                        transactionId,
-                        "SELECT product_id, stock, version FROM products WHERE product_id = ?",
-                        new ProductRowMapper(),
-                        "products",
-                        productId
-                );
-
-                if (products.isEmpty()) {
-                    throw new RuntimeException("Product not found: " + productId);
-                }
-
-                Map<String, Object> oldProductData = products.get(0);
-                Integer version = (Integer) oldProductData.get("version");
-
-                int updated = transactionManager.executeUpdate(
-                        transactionId,
-                        "UPDATE products SET stock = stock + ?, version = version + 1 WHERE product_id = ? AND version = ?",
-                        "products",
-                        "product_id",
-                        productId,
-                        oldProductData,
-                        quantity, productId, version
-                );
-
-                if (updated == 0) {
-                    throw new RuntimeException("Optimistic lock failure - product was modified");
-                }
-
-                transactionManager.commit(transactionId);
-                System.out.println("Inventory restocked successfully!");
-                return;
-
+                productRepo.increaseStock(tx, product, quantity);
+                tm.commit(tx);
             } catch (Exception e) {
-                System.err.println("Restock failed: " + e.getMessage());
-                try {
-                    transactionManager.rollback(transactionId);
-                } catch (Exception rollbackEx) {
-                    System.err.println("Rollback failed: " + rollbackEx.getMessage());
-                }
-                throw new RuntimeException("Failed to restock inventory", e);
+                tm.rollback(tx);
+                throw e;
             }
-        }
-
-        throw new RuntimeException("Failed to restock after " + MAX_RETRIES + " retries");
+        }, "Failed to restock inventory");
     }
 
-    /**
-     * cancel order and refund
-     * - Update order status (UPDATE in order DB)
-     * - Update payment status (UPDATE in order DB)
-     * - Restore product stock (UPDATE in inventory DB)
-     */
     public void cancelOrder(Integer orderId) {
-        int retries = 0;
-
-        while (retries < MAX_RETRIES) {
-            String txId = transactionManager.beginTransaction();
-
+        retryTemplate.execute(() -> {
+            String tx = tm.beginTransaction();
             try {
-                List<Map<String, Object>> orders = transactionManager.executeSelect(
-                        txId,
-                        "SELECT order_id, customer_id, product_id, quantity, status, version FROM orders WHERE order_id = ?",
-                        new OrderRowMapper(),
-                        "orders",
-                        orderId
-                );
-
-                if (orders.isEmpty()) {
-                    throw new RuntimeException("Order not found: " + orderId);
-                }
-
-                Map<String, Object> order = orders.get(0);
-                String status = (String) order.get("status");
-
-                if ("CANCELLED".equals(status)) {
+                Map<String, Object> order = orderRepo.findOrderForUpdate(tx, orderId);
+                validateOrderExists(order);
+                if (STATUS_CANCELLED.equals(order.get("status"))) {
                     throw new RuntimeException("Order already cancelled");
                 }
 
-                Integer productId = (Integer) order.get("product_id");
-                Integer quantity = (Integer) order.get("quantity");
-                Integer orderVersion = (Integer) order.get("version");
+                orderRepo.updateOrderStatus(tx, order, STATUS_CANCELLED);
 
-                Map<String, Object> oldOrderData = new HashMap<>(order);
-
-                transactionManager.executeUpdate(
-                        txId,
-                        "UPDATE orders SET status = ?, version = version + 1 WHERE order_id = ? AND version = ?",
-                        "orders",
-                        "order_id",
-                        orderId,
-                        oldOrderData,
-                        "CANCELLED", orderId, orderVersion
-                );
-
-                List<Map<String, Object>> payments = transactionManager.executeSelect(
-                        txId,
-                        "SELECT payment_id, status FROM payments WHERE order_id = ?",
-                        new PaymentRowMapper(),
-                        "payments",
-                        orderId
-                );
-
-                if (!payments.isEmpty()) {
-                    Map<String, Object> payment = payments.get(0);
-                    Integer paymentId = (Integer) payment.get("payment_id");
-                    Map<String, Object> oldPaymentData = new HashMap<>(payment);
-
-                    transactionManager.executeUpdate(
-                            txId,
-                            "UPDATE payments SET status = ? WHERE payment_id = ?",
-                            "payments",
-                            "payment_id",
-                            paymentId,
-                            oldPaymentData,
-                            "REFUNDED", paymentId
-                    );
+                Map<String, Object> payment = orderRepo.findPaymentForUpdate(tx, orderId);
+                if (payment != null) {
+                    orderRepo.updatePaymentStatus(tx, payment, STATUS_REFUNDED);
                 }
 
-                List<Map<String, Object>> products = transactionManager.executeSelect(
-                        txId,
-                        "SELECT product_id, stock, version FROM products WHERE product_id = ?",
-                        new ProductRowMapper(),
-                        "products",
-                        productId
-                );
-
-                if (!products.isEmpty()) {
-                    Map<String, Object> product = products.get(0);
-                    Integer productVersion = (Integer) product.get("version");
-                    Map<String, Object> oldProductData = new HashMap<>(product);
-
-                    transactionManager.executeUpdate(
-                            txId,
-                            "UPDATE products SET stock = stock + ?, version = version + 1 WHERE product_id = ? AND version = ?",
-                            "products",
-                            "product_id",
-                            productId,
-                            oldProductData,
-                            quantity, productId, productVersion
-                    );
+                Map<String, Object> product = productRepo.findByIdForUpdate(tx, getInt(order.get("product_id")));
+                if (product != null) {
+                    productRepo.increaseStock(tx, product, getInt(order.get("quantity")));
                 }
 
-                transactionManager.commit(txId);
-                System.out.println("Order cancelled successfully!");
-                return;
-
-            } catch (DeadlockException e) {
-                System.err.println("Deadlock detected, retrying...");
-                try {
-                    transactionManager.rollback(txId);
-                } catch (Exception rollbackEx) {
-                    System.err.println("Rollback failed: " + rollbackEx.getMessage());
-                }
-                retries++;
-
-                try {
-                    Thread.sleep((long) Math.pow(2, retries) * 100);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Transaction interrupted", ie);
-                }
-
+                tm.commit(tx);
             } catch (Exception e) {
-                System.err.println("Cancel order failed: " + e.getMessage());
-                try {
-                    transactionManager.rollback(txId);
-                } catch (Exception rollbackEx) {
-                    System.err.println("Rollback failed: " + rollbackEx.getMessage());
-                }
-                throw new RuntimeException("Failed to cancel order", e);
+                tm.rollback(tx);
+                throw e;
             }
-        }
-
-        throw new RuntimeException("Failed to cancel order after " + MAX_RETRIES + " retries");
+        }, "Failed to cancel order");
     }
 
-    private static class ProductRowMapper implements RowMapper<Map<String, Object>> {
-        @Override
-        public Map<String, Object> mapRow(ResultSet rs, int rowNum) throws SQLException {
-            Map<String, Object> map = new HashMap<>();
-            map.put("product_id", rs.getInt("product_id"));
-            if (hasColumn(rs, "name")) map.put("name", rs.getString("name"));
-            if (hasColumn(rs, "price")) map.put("price", rs.getDouble("price"));
-            if (hasColumn(rs, "stock")) map.put("stock", rs.getInt("stock"));
-            if (hasColumn(rs, "version")) map.put("version", rs.getInt("version"));
-            return map;
-        }
+    public void modifyOrderQuantity(Integer orderId, Integer newQuantity) {
+        retryTemplate.execute(() -> {
+            String tx = tm.beginTransaction();
+            try {
+                Map<String, Object> order = orderRepo.findOrderForUpdate(tx, orderId);
+                validateOrderExists(order);
+                if (!STATUS_PENDING.equals(order.get("status"))) {
+                    throw new RuntimeException("Cannot modify non-PENDING order");
+                }
+
+                int oldQuantity = getInt(order.get("quantity"));
+                int diff = newQuantity - oldQuantity;
+
+                if (diff != 0) {
+                    Map<String, Object> product = productRepo.findByIdForUpdate(tx, getInt(order.get("product_id")));
+
+                    if (diff > 0) {
+                        validateProductAvailability(product, diff);
+                        productRepo.decreaseStock(tx, product, diff);
+                    } else {
+                        productRepo.increaseStock(tx, product, Math.abs(diff));
+                    }
+
+                    double price = getDouble(product.get("price"));
+                    int newTotal = (int) (price * newQuantity);
+                    Integer productId = getInt(product.get("product_id"));
+
+                    orderRepo.updateOrderDetails(tx, order, productId, newQuantity, newTotal);
+                    orderRepo.updatePaymentAmount(tx, orderId, newTotal);
+                }
+
+                tm.commit(tx);
+            } catch (Exception e) {
+                tm.rollback(tx);
+                throw e;
+            }
+        }, "Failed to modify order quantity");
     }
 
-    private static class OrderRowMapper implements RowMapper<Map<String, Object>> {
-        @Override
-        public Map<String, Object> mapRow(ResultSet rs, int rowNum) throws SQLException {
-            Map<String, Object> map = new HashMap<>();
-            map.put("order_id", rs.getInt("order_id"));
-            if (hasColumn(rs, "customer_id")) map.put("customer_id", rs.getInt("customer_id"));
-            if (hasColumn(rs, "product_id")) map.put("product_id", rs.getInt("product_id"));
-            if (hasColumn(rs, "quantity")) map.put("quantity", rs.getInt("quantity"));
-            if (hasColumn(rs, "status")) map.put("status", rs.getString("status"));
-            if (hasColumn(rs, "version")) map.put("version", rs.getInt("version"));
-            return map;
-        }
+    public void shipOrder(Integer orderId) {
+        retryTemplate.execute(() -> {
+            String tx = tm.beginTransaction();
+            try {
+                Map<String, Object> order = orderRepo.findOrderForUpdate(tx, orderId);
+                validateOrderExists(order);
+                if (!STATUS_PENDING.equals(order.get("status"))) {
+                    throw new RuntimeException("Order must be PENDING to ship");
+                }
+
+                orderRepo.updateOrderStatus(tx, order, STATUS_SHIPPED);
+
+                int totalAmount = getInt(order.get("total_amount"));
+                orderRepo.updatePaymentAmount(tx, orderId, totalAmount);
+
+                Map<String, Object> payment = orderRepo.findPaymentForUpdate(tx, orderId);
+                if (payment != null) orderRepo.updatePaymentStatus(tx, payment, STATUS_CAPTURED);
+
+                productRepo.logInventoryTransaction(tx, getInt(order.get("product_id")), -getInt(order.get("quantity")));
+
+                tm.commit(tx);
+            } catch (Exception e) {
+                tm.rollback(tx);
+                throw e;
+            }
+        }, "Failed to ship order");
     }
 
-    private static class PaymentRowMapper implements RowMapper<Map<String, Object>> {
-        @Override
-        public Map<String, Object> mapRow(ResultSet rs, int rowNum) throws SQLException {
-            Map<String, Object> map = new HashMap<>();
-            map.put("payment_id", rs.getInt("payment_id"));
-            if (hasColumn(rs, "order_id")) map.put("order_id", rs.getInt("order_id"));
-            if (hasColumn(rs, "amount")) map.put("amount", rs.getInt("amount"));
-            if (hasColumn(rs, "status")) map.put("status", rs.getString("status"));
-            return map;
-        }
+    public void returnOrder(Integer orderId) {
+        retryTemplate.execute(() -> {
+            String tx = tm.beginTransaction();
+            try {
+                Map<String, Object> order = orderRepo.findOrderForUpdate(tx, orderId);
+                validateOrderExists(order);
+                if (!STATUS_SHIPPED.equals(order.get("status"))) {
+                    throw new RuntimeException("Only SHIPPED orders can be returned");
+                }
+
+                orderRepo.updateOrderStatus(tx, order, STATUS_RETURNED);
+
+                Map<String, Object> payment = orderRepo.findPaymentForUpdate(tx, orderId);
+                if (payment != null) orderRepo.updatePaymentStatus(tx, payment, STATUS_REFUNDED);
+
+                Map<String, Object> product = productRepo.findByIdForUpdate(tx, getInt(order.get("product_id")));
+                productRepo.increaseStock(tx, product, getInt(order.get("quantity")));
+
+                tm.commit(tx);
+            } catch (Exception e) {
+                tm.rollback(tx);
+                throw e;
+            }
+        }, "Failed to return order");
     }
 
-    private static boolean hasColumn(ResultSet rs, String columnName) {
-        try {
-            rs.findColumn(columnName);
-            return true;
-        } catch (SQLException e) {
-            return false;
+    public void exchangeProduct(Integer orderId, Integer newProductId) {
+        retryTemplate.execute(() -> {
+            String tx = tm.beginTransaction();
+            try {
+                Map<String, Object> order = orderRepo.findOrderForUpdate(tx, orderId);
+                validateOrderExists(order);
+                int oldProductId = getInt(order.get("product_id"));
+
+                if (oldProductId == newProductId) throw new RuntimeException("Cannot exchange for same product");
+
+                Map<String, Object> oldProduct = productRepo.findByIdForUpdate(tx, oldProductId);
+                Map<String, Object> newProduct = productRepo.findByIdForUpdate(tx, newProductId);
+
+                if (newProduct == null) throw new RuntimeException("New product not found");
+
+                int qty = getInt(order.get("quantity"));
+                validateProductAvailability(newProduct, qty);
+
+                productRepo.increaseStock(tx, oldProduct, qty);
+                productRepo.decreaseStock(tx, newProduct, qty);
+
+                double price = getDouble(newProduct.get("price"));
+                int newTotal = (int) (price * qty);
+
+                orderRepo.updateOrderDetails(tx, order, newProductId, qty, newTotal);
+                orderRepo.updatePaymentAmount(tx, orderId, newTotal);
+
+                tm.commit(tx);
+            } catch (Exception e) {
+                tm.rollback(tx);
+                throw e;
+            }
+        }, "Failed to exchange product");
+    }
+
+    public void discontinueProduct(Integer productId) {
+        retryTemplate.execute(() -> {
+            String tx = tm.beginTransaction();
+            try {
+                Map<String, Object> product = productRepo.findByIdForUpdate(tx, productId);
+                if (product == null) throw new RuntimeException("Product not found");
+
+                productRepo.markDiscontinued(tx, product);
+                productRepo.logInventoryTransaction(tx, productId, 0);
+
+                tm.commit(tx);
+            } catch (Exception e) {
+                tm.rollback(tx);
+                throw e;
+            }
+        }, "Failed to discontinue product");
+    }
+
+    private void validateOrderExists(Map<String, Object> order) {
+        if (order == null) throw new RuntimeException("Order not found");
+    }
+
+    private void validateProductAvailability(Map<String, Object> product, int requiredQty) {
+        if (product == null) throw new RuntimeException("Product not found");
+        if (getInt(product.get("stock")) < requiredQty) throw new RuntimeException("Insufficient stock");
+    }
+
+    private int getInt(Object value) {
+        if (value instanceof Number) {
+            return ((Number) value).intValue();
         }
+        throw new RuntimeException("Invalid number format for: " + value);
+    }
+
+    private double getDouble(Object value) {
+        if (value instanceof Number) {
+            return ((Number) value).doubleValue();
+        }
+        throw new RuntimeException("Invalid number format for: " + value);
     }
 }
