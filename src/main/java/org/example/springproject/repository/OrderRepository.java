@@ -27,8 +27,8 @@ public class OrderRepository {
     }
 
     public Map<String, Object> findPaymentForUpdate(String tx, Integer orderId) {
-        String sql = "SELECT payment_id, status FROM payments WHERE order_id = ?";
-        List<Map<String, Object>> res = tm.executeSelectForUpdate(tx, sql, PAYMENT_MAPPER, TABLE_PAYMENTS, orderId);
+        String sql = "SELECT * FROM payments WHERE order_id = ?";
+        List<Map<String, Object>> res = tm.executeSelectForUpdate(tx, sql, PAYMENT_MAPPER, TABLE_PAYMENTS, null, orderId);
         return res.isEmpty() ? null : res.get(0);
     }
 
@@ -56,11 +56,18 @@ public class OrderRepository {
         tm.executeUpdate(tx, sql, TABLE_ORDERS, COL_ORDER_ID, id, order, newStatus, id, ver);
     }
 
+    public void updateOrderQuantity(String tx, Map<String, Object> order, Integer newQty, Integer newTotal) {
+        Integer id = (Integer) order.get("order_id");
+        Integer ver = (Integer) order.get("version");
+        String sql = "UPDATE orders SET quantity=?, total_amount=?, version=version+1 WHERE order_id=? AND version=?";
+        tm.executeUpdate(tx, sql, TABLE_ORDERS, COL_ORDER_ID, id, order, newQty, newTotal, id, ver);
+    }
+
     public void updateOrderDetails(String tx, Map<String, Object> order, Integer newProductId, Integer newQty, Integer newTotal) {
         Integer id = (Integer) order.get("order_id");
-        String sql = "UPDATE orders SET product_id=?, quantity=?, total_amount=?, version=version+1 WHERE order_id=?";
-
-        tm.executeUpdate(tx, sql, TABLE_ORDERS, COL_ORDER_ID, id, order, newProductId, newQty, newTotal, id);
+        Integer ver = (Integer) order.get("version");
+        String sql = "UPDATE orders SET product_id=?, quantity=?, total_amount=?, version=version+1 WHERE order_id=? AND version=?";
+        tm.executeUpdate(tx, sql, TABLE_ORDERS, COL_ORDER_ID, id, order, newProductId, newQty, newTotal, id, ver);
     }
 
     public void updatePaymentStatus(String tx, Map<String, Object> payment, String newStatus) {
@@ -69,8 +76,9 @@ public class OrderRepository {
         tm.executeUpdate(tx, sql, TABLE_PAYMENTS, COL_PAYMENT_ID, id, payment, newStatus, id);
     }
 
-    public void updatePaymentAmount(String tx, Integer orderId, int newAmount) {
-        String sql = "UPDATE payments SET amount=? WHERE order_id = ?";
-        tm.executeUpdate(tx, sql, TABLE_PAYMENTS, COL_PAYMENT_ID, null, null, newAmount, orderId);
+    public void updatePaymentAmount(String tx, Map<String, Object> payment, int newAmount) {
+        Integer id = (Integer) payment.get("payment_id");
+        String sql = "UPDATE payments SET amount=? WHERE payment_id = ?";
+        tm.executeUpdate(tx, sql, TABLE_PAYMENTS, COL_PAYMENT_ID, id, payment, newAmount, id);
     }
 }

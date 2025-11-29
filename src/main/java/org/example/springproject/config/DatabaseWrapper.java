@@ -1,6 +1,7 @@
 package org.example.springproject.config;
 
 import org.example.springproject.exceptions.DeadlockException;
+import org.example.springproject.models.Transaction;
 import org.example.springproject.transaction.TransactionContext;
 import org.example.springproject.transaction.TransactionOperation;
 import org.example.springproject.transaction.scheduler.TwoPhaseLockingScheduler;
@@ -48,11 +49,31 @@ public class DatabaseWrapper {
         this.jdbcUtils = jdbcUtils;
     }
 
-    public TransactionContext beginTransaction(String txId) throws SQLException {
-        TransactionContext context = new TransactionContext(new org.example.springproject.models.Transaction());
+    public TransactionContext beginTransaction(Transaction tx) throws SQLException {
+        String txId = tx.getTransactionId();
+        System.out.println(">>> DEBUG [DatabaseWrapper]: Beginning transaction " + txId);
+        if (activeTransactions.containsKey(txId)) {
+            System.err.println(">>> WARNING: Transaction " + txId + " already exists. Cleaning up old context.");
+            closeConnections(txId);
+        }
+
+        TransactionContext context = new TransactionContext(tx);
+        Connection inventoryConn = null;
+        Connection orderConn = null;
+
         try {
-            Connection inventoryConn = getConnection(DB_INVENTORY);
-            Connection orderConn = getConnection(DB_ORDER);
+            inventoryConn = getConnection(DB_INVENTORY);
+            orderConn = getConnection(DB_ORDER);
+
+            System.out.println(">>> DEBUG [DatabaseWrapper]: Connections created for " + txId);
+            System.out.println("    - Transaction object ID: " + tx.getTransactionId());
+            System.out.println("    - Context transaction ID: " + context.getTransactionId());
+            System.out.println("    - Inventory connection: " + inventoryConn + " (autoCommit=" + inventoryConn.getAutoCommit() + ")");
+            System.out.println("    - Order connection: " + orderConn + " (autoCommit=" + orderConn.getAutoCommit() + ")");
+
+            if (!txId.equals(context.getTransactionId())) {
+                throw new SQLException("Transaction ID mismatch in DatabaseWrapper!");
+            }
 
             context.setInventoryConnection(inventoryConn);
             context.setOrderConnection(orderConn);
@@ -60,8 +81,22 @@ public class DatabaseWrapper {
             activeTransactions.put(txId, context);
             return context;
         } catch (SQLException e) {
-            if (context.getInventoryConnection() != null) context.getInventoryConnection().close();
-            if (context.getOrderConnection() != null) context.getOrderConnection().close();
+            System.err.println(">>> ERROR [DatabaseWrapper]: Failed to begin transaction " + txId);
+            e.printStackTrace();
+            if (inventoryConn != null) {
+                try {
+                    inventoryConn.close();
+                } catch (SQLException ex) {
+                    System.err.println("Failed to close inventory connection during cleanup");
+                }
+            }
+            if (orderConn != null) {
+                try {
+                    orderConn.close();
+                } catch (SQLException ex) {
+                    System.err.println("Failed to close order connection during cleanup");
+                }
+            }
             throw e;
         }
     }
@@ -82,15 +117,24 @@ public class DatabaseWrapper {
         TransactionOperation op = new TransactionOperation(txId, TransactionOperation.OperationType.SELECT_FOR_UPDATE,
                 database, tableName, primaryKey, null, null, sqlForUpdate, params);
 
+        System.out.println(">>> DEBUG [DatabaseWrapper]: Executing SELECT FOR UPDATE on " + database + "." + tableName + " for tx=" + txId);
+
         checkLockOrThrow(context, op);
 
         try {
             Connection conn = getActiveConnection(context, database);
+            verifyConnectionValid(conn, database, txId);
+
             List<T> result = jdbcUtils.executeQuery(conn, sqlForUpdate, rowMapper, params);
 
+            // CRITICAL: Always complete the operation to log it
             completeOperation(context, op);
+            System.out.println(">>> DEBUG [DatabaseWrapper]: SELECT FOR UPDATE completed and logged");
+
             return result;
         } catch (SQLException | DataAccessException e) {
+            System.err.println(">>> ERROR: SELECT FOR UPDATE failed on " + database + ": " + e.getMessage());
+            e.printStackTrace();
             throw new DeadlockException("Operation failed: " + e.getMessage());
         }
     }
@@ -102,17 +146,28 @@ public class DatabaseWrapper {
         TransactionOperation op = new TransactionOperation(txId, TransactionOperation.OperationType.UPDATE,
                 database, tableName, primaryKey, beforeImage, afterImage, sql, params);
 
+        System.out.println(">>> DEBUG [DatabaseWrapper]: Executing UPDATE on " + database + "." + tableName + " for tx=" + txId);
+
         checkLockOrThrow(context, op);
 
         try {
             Connection conn = getActiveConnection(context, database);
+            verifyConnectionValid(conn, database, txId);
+
             int rows = jdbcUtils.executeUpdate(conn, sql, params);
 
             if (rows > 0) {
+                // CRITICAL: Always complete the operation to log it
                 completeOperation(context, op);
+                System.out.println(">>> DEBUG [DatabaseWrapper]: UPDATE completed and logged (" + rows + " rows)");
+            } else {
+                System.out.println(">>> WARNING [DatabaseWrapper]: UPDATE affected 0 rows, not logging");
             }
+
             return rows;
         } catch (SQLException | DataAccessException e) {
+            System.err.println(">>> ERROR: UPDATE failed on " + database + ": " + e.getMessage());
+            e.printStackTrace();
             throw new DeadlockException("Operation failed: " + e.getMessage());
         }
     }
@@ -127,10 +182,14 @@ public class DatabaseWrapper {
         TransactionOperation initialOp = new TransactionOperation(txId, TransactionOperation.OperationType.INSERT,
                 database, tableName, null, null, data, sql, params);
 
+        System.out.println(">>> DEBUG [DatabaseWrapper]: Executing INSERT on " + database + "." + tableName + " for tx=" + txId);
+
         checkLockOrThrow(context, initialOp);
 
         try {
             Connection conn = getActiveConnection(context, database);
+            verifyConnectionValid(conn, database, txId);
+
             Object primaryKey;
             Integer generatedId = null;
 
@@ -146,20 +205,24 @@ public class DatabaseWrapper {
                     database, tableName, primaryKey, null, data, sql, params);
 
             completeOperation(context, finalOp);
+            System.out.println(">>> DEBUG [DatabaseWrapper]: INSERT completed and logged (id=" + primaryKey + ")");
 
             return generatedId != null ? generatedId : 0;
 
         } catch (SQLException | DataAccessException e) {
+            System.err.println(">>> ERROR: INSERT failed on " + database + ": " + e.getMessage());
+            e.printStackTrace();
             throw new DeadlockException("Operation failed: " + e.getMessage());
         }
     }
 
     public Map<String, Object> fetchBeforeImage(String database, String tableName, Long primaryKey) {
+        Connection conn = null;
         try {
             String pkCol = SchemaUtils.getPrimaryKeyColumn(tableName);
             String sql = "SELECT * FROM " + tableName + " WHERE " + pkCol + " = ?";
 
-            Connection conn = getConnection(database);
+            conn = getConnection(database);
             try {
                 List<Map<String, Object>> result = jdbcUtils.executeQuery(conn, sql, jdbcUtils.getGenericRowMapper(), primaryKey);
                 if (result.isEmpty()) {
@@ -167,7 +230,10 @@ public class DatabaseWrapper {
                 }
                 return result.get(0);
             } finally {
-                conn.close();
+                if (conn != null && !conn.isClosed()) {
+                    conn.setAutoCommit(true);
+                    conn.close();
+                }
             }
         } catch (Exception e) {
             throw new RuntimeException("Failed to fetch before image from " + tableName, e);
@@ -175,10 +241,19 @@ public class DatabaseWrapper {
     }
 
     public void closeConnections(String txId) {
+        System.out.println(">>> DEBUG [DatabaseWrapper]: Closing connections for transaction " + txId);
         TransactionContext context = activeTransactions.remove(txId);
+
         if (context != null) {
-            closeSafely(context.getInventoryConnection());
-            closeSafely(context.getOrderConnection());
+            Connection invConn = context.getInventoryConnection();
+            Connection ordConn = context.getOrderConnection();
+
+            closeSafely(invConn, "inventory", txId);
+            closeSafely(ordConn, "order", txId);
+
+            System.out.println(">>> DEBUG [DatabaseWrapper]: Connections closed for " + txId);
+        } else {
+            System.out.println(">>> DEBUG [DatabaseWrapper]: No context found for " + txId + " (already cleaned up)");
         }
     }
 
@@ -193,25 +268,63 @@ public class DatabaseWrapper {
         return DB_INVENTORY.equals(database) ? context.getInventoryConnection() : context.getOrderConnection();
     }
 
+    private void verifyConnectionValid(Connection conn, String database, String txId) throws SQLException {
+        if (conn == null) {
+            throw new SQLException("Connection is null for database " + database + " in transaction " + txId);
+        }
+        if (conn.isClosed()) {
+            throw new SQLException("Connection is closed for database " + database + " in transaction " + txId);
+        }
+        if (conn.getAutoCommit()) {
+            System.err.println(">>> WARNING: Connection for " + database + " has autoCommit=true! Fixing...");
+            conn.setAutoCommit(false);
+        }
+    }
+
     private void checkLockOrThrow(TransactionContext context, TransactionOperation op) throws DeadlockException {
         if (!scheduler.canExecute(context.getTransaction(), op)) {
+            System.err.println(">>> DEADLOCK: Transaction " + context.getTransactionId() + " cannot acquire lock for " + op.getTableName());
             throw new DeadlockException("Transaction must abort due to lock conflict: " + context.getTransactionId());
         }
     }
 
     private void completeOperation(TransactionContext context, TransactionOperation op) {
+        System.out.println(">>> DEBUG [DatabaseWrapper]: Completing operation - tx=" + context.getTransactionId() +
+                " db=" + op.getDatabase() + " table=" + op.getTableName() + " type=" + op.getOperationType());
+
         op.setExecuted(true);
         operationLog.logOperation(op);
+
+        System.out.println(">>> DEBUG [DatabaseWrapper]: Operation logged to OperationLog");
+
         scheduler.onOperationComplete(context.getTransaction(), op);
+
+        System.out.println(">>> DEBUG [DatabaseWrapper]: Scheduler notified of completion");
     }
 
-    private void closeSafely(Connection conn) {
+    private void closeSafely(Connection conn, String dbName, String txId) {
         if (conn != null) {
             try {
-                conn.close();
+                if (!conn.isClosed()) {
+                    System.out.println(">>> DEBUG [DatabaseWrapper]: Closing " + dbName + " connection for " + txId);
+
+                    // CRITICAL: Reset autoCommit to true before returning to pool
+                    // This ensures the connection is in a clean state for reuse
+                    if (!conn.getAutoCommit()) {
+                        conn.setAutoCommit(true);
+                    }
+
+                    conn.close();
+                    System.out.println(">>> DEBUG [DatabaseWrapper]: " + dbName + " connection closed successfully");
+                } else {
+                    System.out.println(">>> DEBUG [DatabaseWrapper]: " + dbName + " connection was already closed for " + txId);
+                }
             } catch (SQLException e) {
-                System.err.println("Error closing connection: " + e.getMessage());
+                System.err.println(">>> ERROR [DatabaseWrapper]: Error closing " + dbName + " connection for " + txId + ": " + e.getMessage());
+                e.printStackTrace();
             }
+        } else {
+            System.out.println(">>> DEBUG [DatabaseWrapper]: " + dbName + " connection was null for " + txId);
         }
     }
 }

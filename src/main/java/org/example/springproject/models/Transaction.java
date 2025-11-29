@@ -14,7 +14,7 @@ import java.util.concurrent.locks.ReentrantReadWriteLock;
  * Represents a distributed transaction across multiple databases
  */
 public class Transaction {
-    private final String transactionId;
+    private String transactionId;
     private final long timestamp;
     private final LocalDateTime startTime;
     private TransactionStatus status;
@@ -31,6 +31,15 @@ public class Transaction {
 
     public Transaction() {
         this.transactionId = UUID.randomUUID().toString();
+        this.timestamp = System.nanoTime();
+        this.startTime = LocalDateTime.now();
+        this.status = TransactionStatus.ACTIVE;
+        this.operations = new ArrayList<>();
+        this.lock = new ReentrantReadWriteLock();
+    }
+
+    public Transaction(String transactionId) {
+        this.transactionId = transactionId;
         this.timestamp = System.nanoTime();
         this.startTime = LocalDateTime.now();
         this.status = TransactionStatus.ACTIVE;
@@ -79,6 +88,9 @@ public class Transaction {
 
     public String getTransactionId() {
         return transactionId;
+    }
+    public void setTransactionId(String transactionId) {
+        this.transactionId = transactionId;
     }
 
     public long getTimestamp() {

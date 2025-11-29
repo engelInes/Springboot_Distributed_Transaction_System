@@ -109,4 +109,8 @@ public class TransactionOperation {
             return String.format("%s.%s.*", database, tableName);
         }
     }
+
+    public OperationType getOperationType() {
+        return type;
+    }
 }

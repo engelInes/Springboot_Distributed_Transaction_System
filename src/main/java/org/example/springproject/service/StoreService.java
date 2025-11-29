@@ -28,7 +28,8 @@ public class StoreService {
         this.orderRepo = orderRepo;
     }
 
-    public void placeOrder(Integer customerId, Integer productId, Integer quantity) {
+    public Integer placeOrder(Integer customerId, Integer productId, Integer quantity) {
+        java.util.concurrent.atomic.AtomicInteger resultId = new java.util.concurrent.atomic.AtomicInteger();
         retryTemplate.execute(() -> {
             String tx = tm.beginTransaction();
             try {
@@ -44,11 +45,13 @@ public class StoreService {
                 orderRepo.createPayment(tx, orderId, total);
 
                 tm.commit(tx);
+                resultId.set(orderId);
             } catch (Exception e) {
                 tm.rollback(tx);
                 throw e;
             }
         }, "Failed to place order");
+        return resultId.get();
     }
 
     public void restockFromSupplier(Integer productId, Integer quantity) {
@@ -112,22 +115,23 @@ public class StoreService {
                 int oldQuantity = getInt(order.get("quantity"));
                 int diff = newQuantity - oldQuantity;
 
-                if (diff != 0) {
-                    Map<String, Object> product = productRepo.findByIdForUpdate(tx, getInt(order.get("product_id")));
+                Map<String, Object> product = productRepo.findByIdForUpdate(tx, getInt(order.get("product_id")));
+                double price = getDouble(product.get("price"));
+                int newTotal = (int) (price * newQuantity);
 
+                if (diff != 0) {
                     if (diff > 0) {
                         validateProductAvailability(product, diff);
                         productRepo.decreaseStock(tx, product, diff);
                     } else {
                         productRepo.increaseStock(tx, product, Math.abs(diff));
                     }
+                }
 
-                    double price = getDouble(product.get("price"));
-                    int newTotal = (int) (price * newQuantity);
-                    Integer productId = getInt(product.get("product_id"));
-
-                    orderRepo.updateOrderDetails(tx, order, productId, newQuantity, newTotal);
-                    orderRepo.updatePaymentAmount(tx, orderId, newTotal);
+                orderRepo.updateOrderQuantity(tx, order, newQuantity, newTotal);
+                Map<String, Object> payment = orderRepo.findPaymentForUpdate(tx, orderId);
+                if (payment != null) {
+                    orderRepo.updatePaymentAmount(tx, payment, newTotal);
                 }
 
                 tm.commit(tx);
@@ -151,9 +155,9 @@ public class StoreService {
                 orderRepo.updateOrderStatus(tx, order, STATUS_SHIPPED);
 
                 int totalAmount = getInt(order.get("total_amount"));
-                orderRepo.updatePaymentAmount(tx, orderId, totalAmount);
-
                 Map<String, Object> payment = orderRepo.findPaymentForUpdate(tx, orderId);
+                orderRepo.updatePaymentAmount(tx, payment, totalAmount);
+
                 if (payment != null) orderRepo.updatePaymentStatus(tx, payment, STATUS_CAPTURED);
 
                 productRepo.logInventoryTransaction(tx, getInt(order.get("product_id")), -getInt(order.get("quantity")));
@@ -216,8 +220,9 @@ public class StoreService {
                 double price = getDouble(newProduct.get("price"));
                 int newTotal = (int) (price * qty);
 
+                Map<String, Object> payment = orderRepo.findPaymentForUpdate(tx, orderId);
                 orderRepo.updateOrderDetails(tx, order, newProductId, qty, newTotal);
-                orderRepo.updatePaymentAmount(tx, orderId, newTotal);
+                orderRepo.updatePaymentAmount(tx, payment, newTotal);
 
                 tm.commit(tx);
             } catch (Exception e) {

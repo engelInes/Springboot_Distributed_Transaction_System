@@ -28,11 +28,12 @@ public class StoreController {
             Integer productId = request.get("productId");
             Integer quantity = request.get("quantity");
 
-            storeService.placeOrder(customerId, productId, quantity);
+            Integer orderId = storeService.placeOrder(customerId, productId, quantity);
 
             return ResponseEntity.ok(Map.of(
                     "status", "success",
-                    "message", "Order placed successfully"
+                    "message", "Order placed successfully",
+                    "orderId", String.valueOf(orderId)
             ));
         } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(Map.of(
@@ -79,6 +80,119 @@ public class StoreController {
             return ResponseEntity.ok(Map.of(
                     "status", "success",
                     "message", "Order cancelled successfully"
+            ));
+        } catch (RuntimeException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Modify order quantity
+     * PUT /api/store/orders/{orderId}/quantity
+     * Body: { "newQuantity": 5 }
+     */
+    @PutMapping("/orders/{orderId}/quantity")
+    public ResponseEntity<Map<String, String>> modifyOrderQuantity(
+            @PathVariable Integer orderId,
+            @RequestBody Map<String, Integer> request) {
+        try {
+            Integer newQuantity = request.get("newQuantity");
+            storeService.modifyOrderQuantity(orderId, newQuantity);
+
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "message", "Order quantity updated successfully"
+            ));
+        } catch (RuntimeException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Ship an order
+     * POST /api/store/orders/{orderId}/ship
+     */
+    @PostMapping("/orders/{orderId}/ship")
+    public ResponseEntity<Map<String, String>> shipOrder(@PathVariable Integer orderId) {
+        try {
+            storeService.shipOrder(orderId);
+
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "message", "Order shipped successfully"
+            ));
+        } catch (RuntimeException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Return an order
+     * POST /api/store/orders/{orderId}/return
+     */
+    @PostMapping("/orders/{orderId}/return")
+    public ResponseEntity<Map<String, String>> returnOrder(@PathVariable Integer orderId) {
+        try {
+            storeService.returnOrder(orderId);
+
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "message", "Order returned successfully"
+            ));
+        } catch (RuntimeException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Exchange a product in an order
+     * PUT /api/store/orders/{orderId}/exchange
+     * Body: { "newProductId": 102 }
+     */
+    @PutMapping("/orders/{orderId}/exchange")
+    public ResponseEntity<Map<String, String>> exchangeProduct(
+            @PathVariable Integer orderId,
+            @RequestBody Map<String, Integer> request) {
+        try {
+            Integer newProductId = request.get("newProductId");
+            storeService.exchangeProduct(orderId, newProductId);
+
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "message", "Product exchanged successfully"
+            ));
+        } catch (RuntimeException e) {
+            return ResponseEntity.badRequest().body(Map.of(
+                    "status", "error",
+                    "message", e.getMessage()
+            ));
+        }
+    }
+
+    /**
+     * Discontinue a product
+     * DELETE /api/store/products/{productId}
+     */
+    @DeleteMapping("/products/{productId}")
+    public ResponseEntity<Map<String, String>> discontinueProduct(@PathVariable Integer productId) {
+        try {
+            storeService.discontinueProduct(productId);
+
+            return ResponseEntity.ok(Map.of(
+                    "status", "success",
+                    "message", "Product discontinued successfully"
             ));
         } catch (RuntimeException e) {
             return ResponseEntity.badRequest().body(Map.of(

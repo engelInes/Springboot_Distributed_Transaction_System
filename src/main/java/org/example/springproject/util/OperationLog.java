@@ -23,7 +23,16 @@ public class OperationLog {
      * Add a new operation to the transaction's log.
      */
     public void logOperation(TransactionOperation operation) {
+        System.out.println(">>> DEBUG [OperationLog]: Logging operation - tx=" + operation.getTransactionId() +
+                " db=" + operation.getDatabase() +
+                " table=" + operation.getTableName() +
+                " type=" + operation.getOperationType());
+
         transactionLogs.computeIfAbsent(operation.getTransactionId(), k -> new CopyOnWriteArrayList<>()).add(operation);
+
+        int count = transactionLogs.get(operation.getTransactionId()).size();
+        System.out.println(">>> DEBUG [OperationLog]: Operation logged successfully. Total operations for tx=" +
+                operation.getTransactionId() + ": " + count);
     }
 
     /**
@@ -33,6 +42,9 @@ public class OperationLog {
         List<TransactionOperation> operations = transactionLogs.getOrDefault(transactionId, Collections.emptyList());
         List<TransactionOperation> reversed = new CopyOnWriteArrayList<>(operations);
         Collections.reverse(reversed);
+
+        System.out.println(">>> DEBUG [OperationLog]: Retrieved " + reversed.size() + " operations in reverse order for tx=" + transactionId);
+
         return reversed;
     }
 
@@ -40,7 +52,12 @@ public class OperationLog {
      * Clear the log after a transaction commits or aborts/rolls back completely.
      */
     public void clearLog(String transactionId) {
-        transactionLogs.remove(transactionId);
+        List<TransactionOperation> removed = transactionLogs.remove(transactionId);
+        if (removed != null) {
+            System.out.println(">>> DEBUG [OperationLog]: Cleared " + removed.size() + " operations for tx=" + transactionId);
+        } else {
+            System.out.println(">>> DEBUG [OperationLog]: No operations to clear for tx=" + transactionId);
+        }
     }
 
     public void logAbort(String transactionId, String reason) {
@@ -55,9 +72,18 @@ public class OperationLog {
      * Get the list of databases affected by a transaction
      */
     public List<String> getAffectedDatabases(String transactionId) {
-        return transactionLogs.getOrDefault(transactionId, Collections.emptyList()).stream()
+        System.out.println(">>> DEBUG [OperationLog]: Getting affected databases for tx=" + transactionId);
+
+        List<TransactionOperation> operations = transactionLogs.getOrDefault(transactionId, Collections.emptyList());
+        System.out.println(">>> DEBUG [OperationLog]: Found " + operations.size() + " total operations");
+
+        List<String> affectedDbs = operations.stream()
                 .map(TransactionOperation::getDatabase)
                 .distinct()
                 .collect(Collectors.toList());
+
+        System.out.println(">>> DEBUG [OperationLog]: Affected databases: " + affectedDbs);
+
+        return affectedDbs;
     }
 }
